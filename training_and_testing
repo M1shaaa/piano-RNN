@@ -1,0 +1,379 @@
+# Install required packages
+!apt-get install -y git
+!pip install music21
+!pip install keras
+!pip install tensorflow
+
+import os
+import shutil
+import glob
+import pickle
+import numpy
+from music21 import converter, instrument, note, chord, stream
+from keras.models import Sequential
+from keras.layers import Dense, Dropout, LSTM, Activation, BatchNormalization as BatchNorm
+from keras.utils import to_categorical
+from keras.callbacks import ModelCheckpoint
+from IPython.display import clear_output
+
+def setup_piano_rnn():
+    """Set up the project structure and download MIDI files"""
+    # Create necessary directories
+    for directory in ['midi_songs', 'data']:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+            print(f"Created directory: {directory}")
+    
+    # Clone the repository
+    !git clone https://github.com/M1shaaa/piano-RNN.git temp_repo
+    
+    # The files are in the midi_songs folder in the repo
+    midi_files = ['1.midi', '2.midi']
+    files_copied = 0
+    
+    print("\nCopying MIDI files...")
+    for file in midi_files:
+        source = f'temp_repo/midi_songs/{file}'  # Changed path to include midi_songs
+        destination = f'midi_songs/{file}'
+        if os.path.exists(source):
+            shutil.copy2(source, destination)
+            print(f"Successfully copied {file} to midi_songs directory")
+            files_copied += 1
+        else:
+            print(f"Warning: Could not find {file} in the repository")
+    
+    # Clean up
+    !rm -rf temp_repo
+    
+    # Verify files
+    midi_files = glob.glob('midi_songs/*.midi') + glob.glob('midi_songs/*.mid')
+    print(f"\nSetup complete!")
+    print(f"Found {len(midi_files)} MIDI files in midi_songs/:")
+    for file in midi_files:
+        print(f"- {file}")
+    
+    if len(midi_files) == 0:
+        raise Exception("No MIDI files were copied. Please check the repository structure and file names.")
+    
+    return len(midi_files) > 0
+
+
+
+# Rest of your code remains the same, but let's add more error checking
+def get_notes():
+    """ Get notes and chords from the midi files """
+    notes = []
+    midi_files = glob.glob("midi_songs/*.midi") + glob.glob("midi_songs/*.mid")
+    
+    if not midi_files:
+        raise Exception("No MIDI files found in midi_songs directory")
+    
+    for file in midi_files:
+        print(f"Parsing {file}")
+        try:
+            midi = converter.parse(file)
+            
+            try:
+                s2 = instrument.partitionByInstrument(midi)
+                notes_to_parse = s2.parts[0].recurse() 
+            except:
+                notes_to_parse = midi.flat.notes
+                
+            for element in notes_to_parse:
+                if isinstance(element, note.Note):
+                    notes.append(str(element.pitch))
+                elif isinstance(element, chord.Chord):
+                    notes.append('.'.join(str(n) for n in element.normalOrder))
+                    
+        except Exception as e:
+            print(f"Error processing {file}: {str(e)}")
+    
+    if not notes:
+        raise Exception("No notes were extracted from the MIDI files")
+    
+    print(f"Successfully extracted {len(notes)} notes")
+    
+    with open('data/notes', 'wb') as filepath:
+        pickle.dump(notes, filepath)
+    
+    return notes
+
+def prepare_sequences(notes, n_vocab):
+    """ Prepare sequences for training """
+    sequence_length = 100
+    pitchnames = sorted(set(item for item in notes))
+    note_to_int = dict((note, number) for number, note in enumerate(pitchnames))
+
+    network_input = []
+    network_output = []
+
+    for i in range(0, len(notes) - sequence_length, 1):
+        sequence_in = notes[i:i + sequence_length]
+        sequence_out = notes[i + sequence_length]
+        network_input.append([note_to_int[char] for char in sequence_in])
+        network_output.append(note_to_int[sequence_out])
+
+    n_patterns = len(network_input)
+    network_input = numpy.reshape(network_input, (n_patterns, sequence_length, 1))
+    network_input = network_input / float(n_vocab)
+    network_output = to_categorical(network_output)
+
+    return (network_input, network_output)
+
+def create_network(network_input, n_vocab):
+    """ Create the neural network """
+    model = Sequential()
+    model.add(LSTM(512, input_shape=(network_input.shape[1], network_input.shape[2]), 
+                  recurrent_dropout=0.3, return_sequences=True))
+    model.add(LSTM(512, return_sequences=True, recurrent_dropout=0.3))
+    model.add(LSTM(512))
+    model.add(BatchNorm())
+    model.add(Dropout(0.3))
+    model.add(Dense(256))
+    model.add(Activation('relu'))
+    model.add(BatchNorm())
+    model.add(Dropout(0.3))
+    model.add(Dense(n_vocab))
+    model.add(Activation('softmax'))
+    model.compile(loss='categorical_crossentropy', optimizer='rmsprop')
+    return model
+
+
+def train_network():
+    """ Train a Neural Network to generate music """
+    notes = get_notes()
+    n_vocab = len(set(notes))
+    network_input, network_output = prepare_sequences(notes, n_vocab)
+    model = create_network(network_input, n_vocab)
+    train(model, network_input, network_output)
+    
+
+def train(model, network_input, network_output):
+    """ Train the neural network """
+    # Updated filepath to use .keras extension
+    filepath = "weights-improvement-{epoch:02d}-{loss:.4f}-bigger.keras"
+    
+    checkpoint = ModelCheckpoint(
+        filepath,
+        monitor='loss',
+        verbose=1,  # Changed to 1 to see more progress info
+        save_best_only=True,
+        mode='min'
+    )
+    callbacks_list = [checkpoint]
+    
+    model.fit(
+        network_input, 
+        network_output, 
+        epochs=200, 
+        batch_size=128, 
+        callbacks=callbacks_list,
+        verbose=1  # Added verbose=1 for more detailed progress
+    )
+
+
+
+# Start training with error handling
+if __name__ == '__main__':
+    try:
+        if setup_piano_rnn():
+            print("\nStarting training process...")
+            train_network()
+        else:
+            print("Setup failed. Please check the errors above.")
+    except Exception as e:
+        print(f"Error during execution: {str(e)}")
+# Import statements remain the same...
+import os
+import glob
+import pickle
+import numpy
+from music21 import converter, instrument, note, chord, stream
+from keras.models import Sequential, load_model
+from keras.layers import Dense, Dropout, LSTM, Activation, BatchNormalization as BatchNorm
+from keras.utils import to_categorical
+from keras.callbacks import ModelCheckpoint
+
+def resume_training():
+    """Resume training from the last checkpoint"""
+    # Load the notes
+    with open('data/notes', 'rb') as filepath:
+        notes = pickle.load(filepath)
+    
+    # Get preparation values
+    n_vocab = len(set(notes))
+    network_input, network_output = prepare_sequences(notes, n_vocab)
+    
+    # Find the most recent checkpoint
+    checkpoint_files = glob.glob("weights-improvement-*-*.keras")
+    if not checkpoint_files:
+        print("No checkpoint found. Starting fresh training...")
+        model = create_network(network_input, n_vocab)
+        initial_epoch = 0
+    else:
+        latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
+        print(f"Resuming from checkpoint: {latest_checkpoint}")
+        # Get the epoch number from the filename
+        epoch_str = latest_checkpoint.split('-')[2]
+        initial_epoch = int(epoch_str)
+        # Load the model with weights
+        model = create_network(network_input, n_vocab)
+        model.load_weights(latest_checkpoint)
+    
+    # Continue training
+    filepath = "weights-improvement-{epoch:02d}-{loss:.4f}-bigger.keras"
+    checkpoint = ModelCheckpoint(
+        filepath,
+        monitor='loss',
+        verbose=1,
+        save_best_only=True,
+        mode='min'
+    )
+    callbacks_list = [checkpoint]
+    
+    model.fit(
+        network_input, 
+        network_output, 
+        epochs=200,
+        initial_epoch=initial_epoch,  # Start from the last epoch
+        batch_size=128, 
+        callbacks=callbacks_list,
+        verbose=1
+    )
+
+# The rest of your functions (prepare_sequences, create_network, etc.) remain the same...
+
+if __name__ == '__main__':
+    try:
+        print("\nResuming training process...")
+        resume_training()
+    except Exception as e:
+        print(f"Error during execution: {str(e)}")
+---------------------------------------------------------------------------
+ModuleNotFoundError                       Traceback (most recent call last)
+Cell In[1], line 6
+      4 import pickle
+      5 import numpy
+----> 6 from music21 import converter, instrument, note, chord, stream
+      7 from keras.models import Sequential, load_model
+      8 from keras.layers import Dense, Dropout, LSTM, Activation, BatchNormalization as BatchNorm
+
+ModuleNotFoundError: No module named 'music21'
+import pickle
+import numpy
+from music21 import instrument, note, stream, chord
+from keras.models import Sequential
+from keras.layers import Dense, Dropout, LSTM, Activation, BatchNormalization as BatchNorm
+from keras.utils import to_categorical
+
+def generate():
+    """ Generate a piano midi file """
+    #load the notes used to train the model
+    with open('data/notes', 'rb') as filepath:
+        notes = pickle.load(filepath)
+
+    # Get all pitch names
+    pitchnames = sorted(set(item for item in notes))
+    n_vocab = len(set(notes))
+
+    network_input, normalized_input = prepare_sequences(notes, pitchnames, n_vocab)
+    model = create_network(normalized_input, n_vocab)
+    
+    # Use the most recent weights file
+    model.load_weights('weights-improvement-200-2.8755-bigger.keras')
+    
+    prediction_output = generate_notes(model, network_input, pitchnames, n_vocab)
+    create_midi(prediction_output)
+
+def prepare_sequences(notes, pitchnames, n_vocab):
+    """ Prepare the sequences used by the Neural Network """
+    note_to_int = dict((note, number) for number, note in enumerate(pitchnames))
+
+    sequence_length = 100
+    network_input = []
+    for i in range(0, len(notes) - sequence_length, 1):
+        sequence_in = notes[i:i + sequence_length]
+        network_input.append([note_to_int[char] for char in sequence_in])
+
+    n_patterns = len(network_input)
+    normalized_input = numpy.reshape(network_input, (n_patterns, sequence_length, 1))
+    normalized_input = normalized_input / float(n_vocab)
+
+    return (network_input, normalized_input)
+
+def create_network(network_input, n_vocab):
+    """ create the structure of the neural network """
+    model = Sequential()
+    model.add(LSTM(512, input_shape=(network_input.shape[1], network_input.shape[2]), return_sequences=True))
+    model.add(Dropout(0.3))
+    model.add(LSTM(512, return_sequences=True))
+    model.add(Dropout(0.3))
+    model.add(LSTM(512))
+    model.add(BatchNorm())
+    model.add(Dropout(0.3))
+    model.add(Dense(256))
+    model.add(Activation('relu'))
+    model.add(BatchNorm())
+    model.add(Dropout(0.3))
+    model.add(Dense(n_vocab))
+    model.add(Activation('softmax'))
+    model.compile(loss='categorical_crossentropy', optimizer='rmsprop')
+
+    return model
+
+def generate_notes(model, network_input, pitchnames, n_vocab):
+    """ Generate notes from the neural network """
+    # Pick a random sequence from the input as a starting point
+    start = numpy.random.randint(0, len(network_input)-1)
+    int_to_note = dict((number, note) for number, note in enumerate(pitchnames))
+
+    pattern = network_input[start]
+    prediction_output = []
+
+    # Generate 500 notes
+    for note_index in range(500):
+        prediction_input = numpy.reshape(pattern, (1, len(pattern), 1))
+        prediction_input = prediction_input / float(n_vocab)
+
+        prediction = model.predict(prediction_input, verbose=0)
+        index = numpy.argmax(prediction)
+        result = int_to_note[index]
+        prediction_output.append(result)
+        
+        pattern.append(index)
+        pattern = pattern[1:len(pattern)]
+
+    return prediction_output
+
+def create_midi(prediction_output):
+    """ convert the output from the prediction to notes and create a midi file """
+    offset = 0
+    output_notes = []
+
+    # Create note and chord objects
+    for pattern in prediction_output:
+        # Pattern is a chord
+        if ('.' in pattern) or pattern.isdigit():
+            notes_in_chord = pattern.split('.')
+            notes = []
+            for current_note in notes_in_chord:
+                new_note = note.Note(int(current_note))
+                new_note.storedInstrument = instrument.Piano()
+                notes.append(new_note)
+            new_chord = chord.Chord(notes)
+            new_chord.offset = offset
+            output_notes.append(new_chord)
+        # Pattern is a note
+        else:
+            new_note = note.Note(pattern)
+            new_note.offset = offset
+            new_note.storedInstrument = instrument.Piano()
+            output_notes.append(new_note)
+
+        offset += 0.5
+
+    midi_stream = stream.Stream(output_notes)
+    midi_stream.write('midi', fp='output_1.mid')
+
+if __name__ == '__main__':
+    generate()
